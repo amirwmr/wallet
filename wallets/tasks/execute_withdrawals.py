@@ -23,7 +23,7 @@ class ClaimedWithdrawal:
     idempotency_key: str
 
 
-def _lock_for_execution(queryset):
+def _with_execution_lock(queryset):
     if connection.features.has_select_for_update:
         if connection.features.has_select_for_update_skip_locked:
             return queryset.select_for_update(skip_locked=True)
@@ -39,7 +39,7 @@ def _claim_next_due_withdrawal(now):
     ).order_by("execute_at", "id")
 
     with transaction.atomic():
-        tx = _lock_for_execution(queryset).select_related("wallet").first()
+        tx = _with_execution_lock(queryset).select_related("wallet").first()
         if tx is None:
             return None
 
@@ -93,7 +93,7 @@ def _claim_stale_processing_withdrawal(now, *, stale_after_seconds):
     ).order_by("updated_at", "id")
 
     with transaction.atomic():
-        tx = _lock_for_execution(queryset).select_related("wallet").first()
+        tx = _with_execution_lock(queryset).select_related("wallet").first()
         if tx is None:
             return None
 
