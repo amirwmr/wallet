@@ -1,0 +1,1 @@
+"""Wallet app tests package."""
