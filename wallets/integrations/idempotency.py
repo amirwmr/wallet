@@ -1,6 +1,5 @@
 import uuid
 
-from wallets.domain.constants import TransactionType
 from wallets.models import Transaction
 
 
@@ -9,7 +8,7 @@ def generate_idempotency_key():
 
 
 def ensure_transaction_idempotency_key(transaction):
-    if transaction.type != TransactionType.WITHDRAWAL.value:
+    if transaction.type != Transaction.Type.WITHDRAWAL:
         raise ValueError("idempotency key is only used for withdrawal transactions")
 
     if transaction.idempotency_key:

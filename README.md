@@ -11,19 +11,25 @@ A Django + DRF wallet service with a transaction ledger, scheduled withdrawals, 
 - Calls a third-party bank service with retries and idempotency
 - Keeps transaction lifecycle auditable: `SCHEDULED -> PROCESSING -> SUCCEEDED | FAILED`
 
+## Runtime and Tooling Versions
+- Python: `>=3.10` (tested with `3.14.x`)
+- Django: `5.2.1`
+- Django REST Framework: `3.16.1`
+- Tooling config (`pyproject.toml`) targets Python `3.10+`
+
 ## Project Layout
-- `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/wallet/`: Django project settings and URL wiring
-- `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/wallets/models/`: `Wallet` and `Transaction` models
-- `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/wallets/domain/`: business rules and services
-- `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/wallets/integrations/`: HTTP client, retries, bank gateway, idempotency helpers
-- `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/wallets/tasks/`: withdrawal executor
-- `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/wallets/management/commands/`: executor command
-- `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/wallets/tests/`: test suite
+- `wallet/`: Django project settings and URL wiring
+- `wallets/models/`: `Wallet` and `Transaction` models
+- `wallets/domain/`: business rules and services
+- `wallets/integrations/`: HTTP client, retries, bank gateway, idempotency helpers
+- `wallets/tasks/`: withdrawal executor
+- `wallets/management/commands/`: executor command
+- `wallets/tests/`: test suite
 
 ## Environment Configuration
 The app loads `.env` automatically when the file exists in the project root.
 
-1. Copy `/Users/amirwmr/apps/amir/Toman Interview Task/wallet/.env.sample` to `.env`.
+1. Copy `.env.sample` to `.env`.
 2. Fill values for your environment.
 
 ### `.env` keys
@@ -36,6 +42,8 @@ The app loads `.env` automatically when the file exists in the project root.
 - `BANK_TIMEOUT`: bank request timeout in seconds (default `3`)
 - `BANK_RETRY_COUNT`: retry attempts for timeout/connection failures (default `2`)
 - `WITHDRAWAL_PROCESSING_STALE_SECONDS`: how long before reclaiming stale `PROCESSING` withdrawals (default `30`)
+- `EXECUTOR_LOCK_CONTENTION_MAX_RETRIES`: max consecutive lock-contention retries before executor exits (default `20`)
+- `EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS`: backoff sleep per contention retry (default `0.05`)
 - `WALLET_LOG_LEVEL`: log level for executor and bank gateway (default `INFO`)
 
 Production guardrails in settings:
@@ -48,13 +56,14 @@ Production guardrails in settings:
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
-python3 manage.py migrate
-python3 manage.py runserver 127.0.0.1:8000
+python --version  # should be >= 3.10
+python manage.py migrate
+python manage.py runserver 127.0.0.1:8000
 ```
 
 Start the mock bank in another terminal:
 ```bash
-cd /Users/amirwmr/apps/amir/Toman Interview Task/third-party
+cd ../third-party
 python3 app.py
 ```
 
@@ -83,13 +92,15 @@ All API responses use a consistent envelope:
 ## Running the Withdrawal Executor
 Run once:
 ```bash
-python3 manage.py run_withdrawal_executor --limit 100
+python manage.py run_withdrawal_executor --limit 100
 ```
 
 Run continuously:
 ```bash
-python3 manage.py run_withdrawal_executor --loop --sleep-seconds 2 --limit 100
+python manage.py run_withdrawal_executor --loop --sleep-seconds 2 --limit 100
 ```
+
+When lock contention happens under concurrent workers, the executor now retries with configurable backoff instead of exiting immediately.
 
 ## Concurrency and Safety Design
 - Money writes happen inside `transaction.atomic()` blocks.
@@ -99,6 +110,7 @@ python3 manage.py run_withdrawal_executor --loop --sleep-seconds 2 --limit 100
 - Failed bank calls mark transaction `FAILED` and refund the wallet.
 - Each withdrawal has a unique `idempotency_key`; replays use the same key.
 - Stale `PROCESSING` rows are reclaimed and retried safely to avoid stuck debits.
+- Lock contention is handled with bounded retry + backoff to reduce missed throughput under load.
 
 ## Bank Integration Behavior
 - Request: `POST {BANK_BASE_URL}/`
@@ -111,13 +123,14 @@ python3 manage.py run_withdrawal_executor --loop --sleep-seconds 2 --limit 100
 
 ## Test and Quality Commands
 ```bash
-python3 -m isort manage.py wallet wallets
-python3 -m black manage.py wallet wallets
-python3 -m ruff check manage.py wallet wallets
-python3 manage.py check
-python3 manage.py test wallets.tests -v 2
+python -m isort manage.py wallet wallets
+python -m black manage.py wallet wallets
+python -m ruff check manage.py wallet wallets
+python manage.py check
+python manage.py test wallets.tests -v 2
 ```
 
 ## Scope Notes
 - SQLite is default for local development.
 - For stronger lock semantics under real multi-worker load, run with PostgreSQL.
+- Due-withdrawal fetch path uses a composite index on `(type, status, execute_at)` for better high-volume scanning.

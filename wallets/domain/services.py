@@ -1,7 +1,6 @@
 from django.db import transaction
 from django.db.models import F
 
-from wallets.domain.constants import TransactionStatus, TransactionType
 from wallets.domain.exceptions import InvalidTransactionState, WalletNotFound
 from wallets.domain.policies import validate_future_execute_at, validate_positive_amount
 from wallets.integrations.bank_client import BankGateway
@@ -30,8 +29,8 @@ class WalletService:
 
             tx = Transaction.objects.create(
                 wallet=wallet,
-                type=TransactionType.DEPOSIT.value,
-                status=TransactionStatus.SUCCEEDED.value,
+                type=Transaction.Type.DEPOSIT,
+                status=Transaction.Status.SUCCEEDED,
                 amount=validated_amount,
             )
 
@@ -51,8 +50,8 @@ class WithdrawalService:
 
         tx = Transaction.objects.create(
             wallet=wallet,
-            type=TransactionType.WITHDRAWAL.value,
-            status=TransactionStatus.SCHEDULED.value,
+            type=Transaction.Type.WITHDRAWAL,
+            status=Transaction.Status.SCHEDULED,
             amount=validated_amount,
             execute_at=validated_execute_at,
             idempotency_key=generate_idempotency_key(),
@@ -75,23 +74,23 @@ class WithdrawalService:
                     f"transaction={transaction_id} does not exist"
                 ) from exc
 
-            if tx.type != TransactionType.WITHDRAWAL.value:
+            if tx.type != Transaction.Type.WITHDRAWAL:
                 raise InvalidTransactionState(
                     "only withdrawal transactions can be executed"
                 )
 
-            if tx.status != TransactionStatus.SCHEDULED.value:
+            if tx.status != Transaction.Status.SCHEDULED:
                 raise InvalidTransactionState(
-                    f"transaction status must be {TransactionStatus.SCHEDULED.value}, got={tx.status}"
+                    f"transaction status must be {Transaction.Status.SCHEDULED}, got={tx.status}"
                 )
 
             wallet = Wallet.objects.select_for_update().get(pk=tx.wallet_id)
-            tx.status = TransactionStatus.PROCESSING.value
+            tx.status = Transaction.Status.PROCESSING
             tx.failure_reason = None
             tx.save(update_fields=["status", "failure_reason", "updated_at"])
 
             if wallet.balance < tx.amount:
-                tx.status = TransactionStatus.FAILED.value
+                tx.status = Transaction.Status.FAILED
                 tx.failure_reason = "insufficient_balance"
                 tx.save(update_fields=["status", "failure_reason", "updated_at"])
                 return tx
@@ -115,7 +114,7 @@ class WithdrawalService:
             wallet = Wallet.objects.select_for_update().get(pk=tx.wallet_id)
 
             if transfer_result.success:
-                tx.status = TransactionStatus.SUCCEEDED.value
+                tx.status = Transaction.Status.SUCCEEDED
                 tx.external_reference = transfer_result.reference
                 tx.bank_reference = transfer_result.reference
                 tx.failure_reason = None
@@ -131,7 +130,7 @@ class WithdrawalService:
                 return tx
 
             Wallet.objects.filter(pk=wallet.pk).update(balance=F("balance") + tx.amount)
-            tx.status = TransactionStatus.FAILED.value
+            tx.status = Transaction.Status.FAILED
             tx.failure_reason = transfer_result.error_reason or "bank_transfer_failed"
             tx.save(update_fields=["status", "failure_reason", "updated_at"])
             return tx

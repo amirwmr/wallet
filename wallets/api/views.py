@@ -25,7 +25,7 @@ class WalletDepositAPIView(APIView):
             return api_response(
                 detail=serializer.errors,
                 message_en="Invalid request body.",
-                message_fa="بدنه درخواست نامعتبر است.",
+                message_fa="درخواست نامعتبر است.",
                 status_code=http_status.HTTP_400_BAD_REQUEST,
                 data=None,
             )
@@ -72,7 +72,7 @@ class WalletWithdrawalScheduleAPIView(APIView):
             return api_response(
                 detail=serializer.errors,
                 message_en="Invalid request body.",
-                message_fa="بدنه درخواست نامعتبر است.",
+                message_fa="درخواست نامعتبر است.",
                 status_code=http_status.HTTP_400_BAD_REQUEST,
                 data=None,
             )

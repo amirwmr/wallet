@@ -1,4 +1,5 @@
 import logging
+import time
 from dataclasses import dataclass
 from datetime import timedelta
 
@@ -7,7 +8,6 @@ from django.db import OperationalError, connection, transaction
 from django.db.models import F
 from django.utils import timezone
 
-from wallets.domain.constants import TransactionStatus, TransactionType
 from wallets.integrations.bank_client import BankGateway, TransferResult
 from wallets.integrations.idempotency import ensure_transaction_idempotency_key
 from wallets.models import Transaction, Wallet
@@ -33,8 +33,8 @@ def _with_execution_lock(queryset):
 
 def _claim_next_due_withdrawal(now):
     queryset = Transaction.objects.filter(
-        type=TransactionType.WITHDRAWAL.value,
-        status=TransactionStatus.SCHEDULED.value,
+        type=Transaction.Type.WITHDRAWAL,
+        status=Transaction.Status.SCHEDULED,
         execute_at__lte=now,
     ).order_by("execute_at", "id")
 
@@ -48,7 +48,7 @@ def _claim_next_due_withdrawal(now):
             balance=F("balance") - tx.amount
         )
         if debited == 0:
-            tx.status = TransactionStatus.FAILED.value
+            tx.status = Transaction.Status.FAILED
             tx.failure_reason = "INSUFFICIENT_FUNDS"
             tx.save(update_fields=["status", "failure_reason", "updated_at"])
             logger.info(
@@ -60,7 +60,7 @@ def _claim_next_due_withdrawal(now):
             return {"outcome": "insufficient_funds", "transaction_id": tx.id}
 
         tx.idempotency_key = ensure_transaction_idempotency_key(tx)
-        tx.status = TransactionStatus.PROCESSING.value
+        tx.status = Transaction.Status.PROCESSING
         tx.failure_reason = None
         tx.save(
             update_fields=["idempotency_key", "status", "failure_reason", "updated_at"]
@@ -87,8 +87,8 @@ def _claim_next_due_withdrawal(now):
 def _claim_stale_processing_withdrawal(now, *, stale_after_seconds):
     stale_before = now - timedelta(seconds=stale_after_seconds)
     queryset = Transaction.objects.filter(
-        type=TransactionType.WITHDRAWAL.value,
-        status=TransactionStatus.PROCESSING.value,
+        type=Transaction.Type.WITHDRAWAL,
+        status=Transaction.Status.PROCESSING,
         updated_at__lte=stale_before,
     ).order_by("updated_at", "id")
 
@@ -124,7 +124,7 @@ def _finalize_claimed_withdrawal(claim, transfer_result):
         tx = Transaction.objects.select_for_update().get(pk=claim.transaction_id)
         wallet = Wallet.objects.select_for_update().get(pk=tx.wallet_id)
 
-        if tx.status != TransactionStatus.PROCESSING.value:
+        if tx.status != Transaction.Status.PROCESSING:
             logger.info(
                 "event=withdrawal_finalize_skipped tx_id=%s current_status=%s",
                 tx.id,
@@ -133,7 +133,7 @@ def _finalize_claimed_withdrawal(claim, transfer_result):
             return "skipped"
 
         if transfer_result.success:
-            tx.status = TransactionStatus.SUCCEEDED.value
+            tx.status = Transaction.Status.SUCCEEDED
             tx.external_reference = transfer_result.reference
             tx.bank_reference = transfer_result.reference
             tx.failure_reason = None
@@ -155,7 +155,7 @@ def _finalize_claimed_withdrawal(claim, transfer_result):
             return "succeeded"
 
         Wallet.objects.filter(pk=wallet.pk).update(balance=F("balance") + tx.amount)
-        tx.status = TransactionStatus.FAILED.value
+        tx.status = Transaction.Status.FAILED
         tx.failure_reason = transfer_result.error_reason or "BANK_TRANSFER_FAILED"
         tx.save(update_fields=["status", "failure_reason", "updated_at"])
         logger.warning(
@@ -181,17 +181,22 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
 
     bank_gateway = gateway or BankGateway()
     stale_after_seconds = settings.WITHDRAWAL_PROCESSING_STALE_SECONDS
+    max_lock_contention_retries = settings.EXECUTOR_LOCK_CONTENTION_MAX_RETRIES
+    lock_contention_backoff_seconds = settings.EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS
     logger.info(
-        "event=executor_start limit=%s now=%s stale_after_seconds=%s",
+        "event=executor_start limit=%s now=%s stale_after_seconds=%s max_lock_contention_retries=%s lock_contention_backoff_seconds=%s",
         limit,
         now.isoformat(),
         stale_after_seconds,
+        max_lock_contention_retries,
+        lock_contention_backoff_seconds,
     )
 
     processed = 0
     succeeded = 0
     failed = 0
     insufficient_funds = 0
+    lock_contention_retries = 0
 
     while processed < limit:
         try:
@@ -202,11 +207,27 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
                     stale_after_seconds=stale_after_seconds,
                 )
         except OperationalError:
-            logger.warning("event=executor_lock_contention limit=%s", limit)
-            break
+            lock_contention_retries += 1
+            logger.warning(
+                "event=executor_lock_contention limit=%s retry=%s max_retries=%s",
+                limit,
+                lock_contention_retries,
+                max_lock_contention_retries,
+            )
+            if lock_contention_retries > max_lock_contention_retries:
+                logger.warning(
+                    "event=executor_lock_contention_exhausted limit=%s retries=%s",
+                    limit,
+                    lock_contention_retries,
+                )
+                break
+            if lock_contention_backoff_seconds > 0:
+                time.sleep(lock_contention_backoff_seconds)
+            continue
 
         if claim_result is None:
             break
+        lock_contention_retries = 0
 
         outcome = claim_result["outcome"]
         if outcome == "insufficient_funds":

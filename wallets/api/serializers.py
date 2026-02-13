@@ -1,6 +1,5 @@
 from rest_framework import serializers
 
-from wallets.domain.constants import TransactionStatus, TransactionType
 from wallets.models import Transaction, Wallet
 
 
@@ -41,10 +40,10 @@ class TransactionSerializer(serializers.ModelSerializer):
 
 class TransactionFilterSerializer(serializers.Serializer):
     type = serializers.ChoiceField(
-        choices=[item.value for item in TransactionType],
+        choices=Transaction.Type.values,
         required=False,
     )
     status = serializers.ChoiceField(
-        choices=[item.value for item in TransactionStatus],
+        choices=Transaction.Status.values,
         required=False,
     )

@@ -13,7 +13,7 @@ class Wallet(models.Model):
     class Meta:
         constraints = [
             models.CheckConstraint(
-                check=Q(balance__gte=0),
+                condition=Q(balance__gte=0),
                 name="wallet_balance_non_negative",
             ),
         ]

@@ -4,7 +4,6 @@ from unittest.mock import Mock
 from django.test import TestCase
 from django.utils import timezone
 
-from wallets.domain.constants import TransactionStatus
 from wallets.domain.services import WithdrawalService
 from wallets.integrations.bank_client import TransferResult
 from wallets.integrations.idempotency import (
@@ -70,7 +69,7 @@ class WithdrawalExecuteTests(TestCase):
         tx.refresh_from_db()
         wallet.refresh_from_db()
 
-        self.assertEqual(tx.status, TransactionStatus.SUCCEEDED.value)
+        self.assertEqual(tx.status, Transaction.Status.SUCCEEDED)
         self.assertEqual(tx.bank_reference, "bank-ref-1")
         self.assertEqual(tx.external_reference, "bank-ref-1")
         self.assertEqual(wallet.balance, 700)
@@ -100,7 +99,7 @@ class WithdrawalExecuteTests(TestCase):
         tx.refresh_from_db()
         wallet.refresh_from_db()
 
-        self.assertEqual(tx.status, TransactionStatus.FAILED.value)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "bank_unavailable")
         self.assertEqual(wallet.balance, 1_000)
 
@@ -124,7 +123,7 @@ class WithdrawalExecuteTests(TestCase):
         tx.refresh_from_db()
         wallet.refresh_from_db()
 
-        self.assertEqual(tx.status, TransactionStatus.FAILED.value)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "network_error")
         self.assertEqual(wallet.balance, 1_000)
 
@@ -145,7 +144,7 @@ class WithdrawalExecuteTests(TestCase):
         tx.refresh_from_db()
         wallet.refresh_from_db()
 
-        self.assertEqual(tx.status, TransactionStatus.FAILED.value)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "insufficient_balance")
         self.assertEqual(wallet.balance, 100)
         gateway.transfer.assert_not_called()

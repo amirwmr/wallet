@@ -34,23 +34,24 @@ class Transaction(models.Model):
     class Meta:
         indexes = [
             models.Index(
-                fields=["status", "execute_at"], name="txn_status_execute_idx"
+                fields=["type", "status", "execute_at"],
+                name="txn_type_status_execute_idx",
             ),
         ]
         constraints = [
             models.CheckConstraint(
-                check=Q(amount__gt=0),
+                condition=Q(amount__gt=0),
                 name="transaction_amount_gt_zero",
             ),
             models.CheckConstraint(
-                check=(
+                condition=(
                     Q(type="DEPOSIT", execute_at__isnull=True)
                     | Q(type="WITHDRAWAL", execute_at__isnull=False)
                 ),
                 name="transaction_execute_at_by_type",
             ),
             models.CheckConstraint(
-                check=(
+                condition=(
                     Q(type="DEPOSIT", idempotency_key__isnull=True)
                     | Q(type="WITHDRAWAL", idempotency_key__isnull=False)
                 ),

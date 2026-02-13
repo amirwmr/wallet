@@ -10,7 +10,6 @@ from django.test import TestCase, TransactionTestCase
 from django.test.utils import override_settings
 from django.utils import timezone
 
-from wallets.domain.constants import TransactionStatus
 from wallets.domain.services import WithdrawalService
 from wallets.integrations.bank_client import TransferResult
 from wallets.models import Transaction, Wallet
@@ -47,7 +46,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(summary["succeeded"], 1)
         self.assertEqual(summary["failed"], 0)
         self.assertEqual(summary["insufficient_funds"], 0)
-        self.assertEqual(tx.status, TransactionStatus.SUCCEEDED.value)
+        self.assertEqual(tx.status, Transaction.Status.SUCCEEDED)
         self.assertEqual(tx.bank_reference, "bank-ref-300")
         self.assertEqual(tx.external_reference, "bank-ref-300")
         self.assertEqual(wallet.balance, 700)
@@ -72,7 +71,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(summary["succeeded"], 0)
         self.assertEqual(summary["failed"], 1)
         self.assertEqual(summary["insufficient_funds"], 1)
-        self.assertEqual(tx.status, TransactionStatus.FAILED.value)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "INSUFFICIENT_FUNDS")
         self.assertEqual(wallet.balance, 100)
         gateway.transfer.assert_not_called()
@@ -94,7 +93,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(summary["processed"], 1)
         self.assertEqual(summary["succeeded"], 0)
         self.assertEqual(summary["failed"], 1)
-        self.assertEqual(tx.status, TransactionStatus.FAILED.value)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "bank_failed")
         self.assertEqual(wallet.balance, 900)
 
@@ -104,7 +103,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
         tx = self._schedule_due_withdrawal(wallet, amount=250)
 
         Transaction.objects.filter(pk=tx.pk).update(
-            status=TransactionStatus.PROCESSING.value,
+            status=Transaction.Status.PROCESSING,
             updated_at=timezone.now() - timedelta(seconds=120),
         )
         Wallet.objects.filter(pk=wallet.pk).update(balance=750)
@@ -123,7 +122,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(summary["processed"], 1)
         self.assertEqual(summary["succeeded"], 1)
         self.assertEqual(summary["failed"], 0)
-        self.assertEqual(tx.status, TransactionStatus.SUCCEEDED.value)
+        self.assertEqual(tx.status, Transaction.Status.SUCCEEDED)
         self.assertEqual(tx.bank_reference, "bank-ref-stale")
         self.assertEqual(wallet.balance, 750)
         gateway.transfer.assert_called_once_with(
@@ -138,7 +137,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
         tx = self._schedule_due_withdrawal(wallet, amount=200)
 
         Transaction.objects.filter(pk=tx.pk).update(
-            status=TransactionStatus.PROCESSING.value,
+            status=Transaction.Status.PROCESSING,
             updated_at=timezone.now() - timedelta(seconds=120),
         )
         Wallet.objects.filter(pk=wallet.pk).update(balance=1_000)
@@ -157,7 +156,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(summary["processed"], 1)
         self.assertEqual(summary["succeeded"], 0)
         self.assertEqual(summary["failed"], 1)
-        self.assertEqual(tx.status, TransactionStatus.FAILED.value)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "network_error")
         self.assertEqual(wallet.balance, 1_200)
 
@@ -219,8 +218,8 @@ class ExecuteDueWithdrawalsConcurrencyTests(TransactionTestCase):
         self.assertGreaterEqual(wallet.balance, 0)
 
         statuses = [tx1.status, tx2.status]
-        self.assertLessEqual(statuses.count(TransactionStatus.SUCCEEDED.value), 1)
-        self.assertGreaterEqual(statuses.count(TransactionStatus.FAILED.value), 1)
+        self.assertLessEqual(statuses.count(Transaction.Status.SUCCEEDED), 1)
+        self.assertGreaterEqual(statuses.count(Transaction.Status.FAILED), 1)
 
 
 class WithdrawalExecutorCommandTests(TestCase):

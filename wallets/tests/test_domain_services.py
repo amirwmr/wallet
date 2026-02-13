@@ -3,7 +3,6 @@ from datetime import timedelta
 from django.test import TestCase
 from django.utils import timezone
 
-from wallets.domain.constants import TransactionStatus, TransactionType
 from wallets.domain.exceptions import InvalidAmount, InvalidExecuteAt, WalletNotFound
 from wallets.domain.services import WalletService, WithdrawalService
 from wallets.models import Transaction, Wallet
@@ -18,8 +17,8 @@ class WalletServiceDepositTests(TestCase):
         wallet.refresh_from_db()
         self.assertEqual(wallet.balance, 1_250)
         self.assertEqual(tx.wallet_id, wallet.id)
-        self.assertEqual(tx.type, TransactionType.DEPOSIT.value)
-        self.assertEqual(tx.status, TransactionStatus.SUCCEEDED.value)
+        self.assertEqual(tx.type, Transaction.Type.DEPOSIT)
+        self.assertEqual(tx.status, Transaction.Status.SUCCEEDED)
         self.assertEqual(tx.amount, 250)
         self.assertIsNone(tx.execute_at)
         self.assertIsNone(tx.idempotency_key)
@@ -55,8 +54,8 @@ class WithdrawalServiceScheduleTests(TestCase):
         wallet.refresh_from_db()
         self.assertEqual(wallet.balance, 100)
         self.assertEqual(tx.wallet_id, wallet.id)
-        self.assertEqual(tx.type, TransactionType.WITHDRAWAL.value)
-        self.assertEqual(tx.status, TransactionStatus.SCHEDULED.value)
+        self.assertEqual(tx.type, Transaction.Type.WITHDRAWAL)
+        self.assertEqual(tx.status, Transaction.Status.SCHEDULED)
         self.assertEqual(tx.amount, 500)
         self.assertEqual(tx.execute_at, execute_at)
         self.assertTrue(tx.idempotency_key)
