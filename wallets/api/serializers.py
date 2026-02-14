@@ -12,6 +12,11 @@ class WalletSerializer(serializers.ModelSerializer):
 
 class DepositRequestSerializer(serializers.Serializer):
     amount = serializers.IntegerField()
+    idempotency_key = serializers.CharField(
+        required=False,
+        allow_blank=False,
+        max_length=128,
+    )
 
 
 class ScheduleWithdrawalRequestSerializer(serializers.Serializer):

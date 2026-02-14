@@ -29,6 +29,72 @@ class WalletPhase4ApiTests(APITestCase):
         self.assertEqual(response.data["data"]["transaction"]["type"], "DEPOSIT")
         self.assertEqual(response.data["data"]["transaction"]["status"], "SUCCEEDED")
 
+    def test_deposit_endpoint_is_idempotent_with_header_key(self):
+        path = f"/api/wallets/{self.wallet.id}/deposit/"
+
+        first = self.client.post(
+            path,
+            {"amount": 250},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-deposit-001",
+        )
+        second = self.client.post(
+            path,
+            {"amount": 250},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-deposit-001",
+        )
+
+        self.wallet.refresh_from_db()
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data["status"], 201)
+        self.assertEqual(second.data["status"], 200)
+        self.assertEqual(
+            first.data["data"]["transaction"]["id"],
+            second.data["data"]["transaction"]["id"],
+        )
+        self.assertEqual(self.wallet.balance, 1_250)
+        self.assertEqual(
+            Transaction.objects.filter(idempotency_key="api-deposit-001").count(),
+            1,
+        )
+
+    def test_deposit_endpoint_rejects_idempotency_payload_conflict(self):
+        path = f"/api/wallets/{self.wallet.id}/deposit/"
+
+        first = self.client.post(
+            path,
+            {"amount": 120},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-deposit-002",
+        )
+        second = self.client.post(
+            path,
+            {"amount": 130},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-deposit-002",
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.data["status"], 409)
+
+    def test_deposit_endpoint_rejects_idempotency_header_body_mismatch(self):
+        path = f"/api/wallets/{self.wallet.id}/deposit/"
+
+        response = self.client.post(
+            path,
+            {"amount": 150, "idempotency_key": "body-deposit-key"},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="header-deposit-key",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["status"], 400)
+        self.assertIn("detail", response.data)
+
     def test_schedule_withdrawal_endpoint_success(self):
         execute_at = (timezone.now() + timedelta(minutes=30)).isoformat()
 

@@ -77,9 +77,9 @@ Base path: `/api/wallets/`
 - `GET /api/wallets/{wallet_id}/transactions/`
 - `GET /health/`
 
-Withdrawal scheduling supports request idempotency:
+Deposit and withdrawal scheduling support request idempotency:
 - Send `Idempotency-Key` header (recommended) or `idempotency_key` in body.
-- Same key + same payload returns the existing scheduled transaction (`200` replay).
+- Same key + same payload returns the existing transaction (`200` replay).
 - Same key + different payload returns `409`.
 
 All API responses use a consistent envelope:

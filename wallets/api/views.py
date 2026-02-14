@@ -36,10 +36,25 @@ class WalletDepositAPIView(APIView):
                 data=None,
             )
 
+        body_idempotency_key = serializer.validated_data.get("idempotency_key")
+        header_idempotency_key = request.headers.get("Idempotency-Key")
+        if body_idempotency_key and header_idempotency_key:
+            if body_idempotency_key != header_idempotency_key:
+                return api_response(
+                    detail="idempotency key mismatch between header and body",
+                    message_en="Invalid deposit request.",
+                    message_fa="درخواست واریز نامعتبر است.",
+                    status_code=http_status.HTTP_400_BAD_REQUEST,
+                    data=None,
+                )
+        request_idempotency_key = header_idempotency_key or body_idempotency_key
+
         try:
-            tx = WalletService.deposit(
+            tx, created = WalletService.deposit(
                 wallet_id=wallet_id,
                 amount=serializer.validated_data["amount"],
+                idempotency_key=request_idempotency_key,
+                include_created=True,
             )
         except WalletNotFound:
             return api_response(
@@ -49,12 +64,20 @@ class WalletDepositAPIView(APIView):
                 status_code=http_status.HTTP_404_NOT_FOUND,
                 data=None,
             )
-        except InvalidAmount as exc:
+        except (InvalidAmount, InvalidIdempotencyKey) as exc:
             return api_response(
                 detail=str(exc),
-                message_en="Invalid amount.",
-                message_fa="مبلغ نامعتبر است.",
+                message_en="Invalid deposit request.",
+                message_fa="درخواست واریز نامعتبر است.",
                 status_code=http_status.HTTP_400_BAD_REQUEST,
+                data=None,
+            )
+        except IdempotencyConflict as exc:
+            return api_response(
+                detail=str(exc),
+                message_en="Idempotency key already used for another request.",
+                message_fa="کلید یکتایی برای درخواست دیگری استفاده شده است.",
+                status_code=http_status.HTTP_409_CONFLICT,
                 data=None,
             )
 
@@ -62,11 +85,22 @@ class WalletDepositAPIView(APIView):
             "wallet": WalletSerializer(tx.wallet).data,
             "transaction": TransactionSerializer(tx).data,
         }
+        if created:
+            detail = "Deposit transaction created."
+            message_en = "Deposit completed successfully."
+            message_fa = "واریز با موفقیت انجام شد."
+            status_code = http_status.HTTP_201_CREATED
+        else:
+            detail = "Deposit request already exists for this idempotency key."
+            message_en = "Deposit request already accepted."
+            message_fa = "درخواست واریز قبلا ثبت شده است."
+            status_code = http_status.HTTP_200_OK
+
         return api_response(
-            detail="Deposit transaction created.",
-            message_en="Deposit completed successfully.",
-            message_fa="واریز با موفقیت انجام شد.",
-            status_code=http_status.HTTP_201_CREATED,
+            detail=detail,
+            message_en=message_en,
+            message_fa=message_fa,
+            status_code=status_code,
             data=payload,
         )
 

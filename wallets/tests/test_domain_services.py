@@ -45,6 +45,54 @@ class WalletServiceDepositTests(TestCase):
         with self.assertRaises(WalletNotFound):
             WalletService.deposit(wallet_id=999_999, amount=100)
 
+    def test_deposit_reuses_existing_transaction_for_same_idempotency_key(self):
+        wallet = Wallet.objects.create(balance=1_000)
+
+        first = WalletService.deposit(
+            wallet_id=wallet.id,
+            amount=250,
+            idempotency_key="deposit-001",
+        )
+        second = WalletService.deposit(
+            wallet_id=wallet.id,
+            amount=250,
+            idempotency_key="deposit-001",
+        )
+
+        wallet.refresh_from_db()
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(wallet.balance, 1_250)
+        self.assertEqual(
+            Transaction.objects.filter(idempotency_key="deposit-001").count(),
+            1,
+        )
+
+    def test_deposit_rejects_idempotency_key_conflict(self):
+        wallet = Wallet.objects.create(balance=1_000)
+
+        WalletService.deposit(
+            wallet_id=wallet.id,
+            amount=250,
+            idempotency_key="deposit-002",
+        )
+
+        with self.assertRaises(IdempotencyConflict):
+            WalletService.deposit(
+                wallet_id=wallet.id,
+                amount=350,
+                idempotency_key="deposit-002",
+            )
+
+    def test_deposit_rejects_empty_idempotency_key(self):
+        wallet = Wallet.objects.create(balance=1_000)
+
+        with self.assertRaises(InvalidIdempotencyKey):
+            WalletService.deposit(
+                wallet_id=wallet.id,
+                amount=100,
+                idempotency_key="  ",
+            )
+
 
 class WithdrawalServiceScheduleTests(TestCase):
     def test_schedule_withdrawal_creates_scheduled_transaction(self):

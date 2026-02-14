@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 class WalletService:
     @staticmethod
-    def deposit(wallet_id, amount):
+    def deposit(wallet_id, amount, *, idempotency_key=None, include_created=False):
         validated_amount = validate_positive_amount(amount)
 
         with transaction.atomic():
@@ -32,19 +32,52 @@ class WalletService:
             except Wallet.DoesNotExist as exc:
                 raise WalletNotFound(f"wallet={wallet_id} does not exist") from exc
 
-            Wallet.objects.filter(pk=wallet.pk).update(
-                balance=F("balance") + validated_amount
-            )
-            wallet.refresh_from_db(fields=["balance", "updated_at"])
+            if idempotency_key is None:
+                Wallet.objects.filter(pk=wallet.pk).update(
+                    balance=F("balance") + validated_amount
+                )
+                wallet.refresh_from_db(fields=["balance", "updated_at"])
 
-            tx = Transaction.objects.create(
-                wallet=wallet,
-                type=Transaction.Type.DEPOSIT,
-                status=Transaction.Status.SUCCEEDED,
-                amount=validated_amount,
-            )
+                tx = Transaction.objects.create(
+                    wallet=wallet,
+                    type=Transaction.Type.DEPOSIT,
+                    status=Transaction.Status.SUCCEEDED,
+                    amount=validated_amount,
+                )
+                if include_created:
+                    return tx, True
+                return tx
 
-        return tx
+            normalized_idempotency_key = idempotency_key.strip()
+            if not normalized_idempotency_key:
+                raise InvalidIdempotencyKey("idempotency_key cannot be empty")
+
+            tx, created = Transaction.objects.get_or_create(
+                idempotency_key=normalized_idempotency_key,
+                defaults={
+                    "wallet": wallet,
+                    "type": Transaction.Type.DEPOSIT,
+                    "status": Transaction.Status.SUCCEEDED,
+                    "amount": validated_amount,
+                },
+            )
+            if created:
+                Wallet.objects.filter(pk=wallet.pk).update(
+                    balance=F("balance") + validated_amount
+                )
+                wallet.refresh_from_db(fields=["balance", "updated_at"])
+            elif (
+                tx.type != Transaction.Type.DEPOSIT
+                or tx.wallet_id != wallet.id
+                or tx.amount != validated_amount
+            ):
+                raise IdempotencyConflict(
+                    "idempotency_key already used with a different deposit payload"
+                )
+
+            if include_created:
+                return tx, created
+            return tx
 
 
 class WithdrawalService:

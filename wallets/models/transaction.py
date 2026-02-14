@@ -52,7 +52,7 @@ class Transaction(models.Model):
             ),
             models.CheckConstraint(
                 condition=(
-                    Q(type="DEPOSIT", idempotency_key__isnull=True)
+                    Q(type="DEPOSIT")
                     | Q(type="WITHDRAWAL", idempotency_key__isnull=False)
                 ),
                 name="transaction_idempotency_by_type",
