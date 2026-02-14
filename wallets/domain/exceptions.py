@@ -16,3 +16,11 @@ class InvalidExecuteAt(DomainError):
 
 class InvalidTransactionState(DomainError):
     """Raised when transaction transition is not allowed."""
+
+
+class InvalidIdempotencyKey(DomainError):
+    """Raised when idempotency key format/value is invalid."""
+
+
+class IdempotencyConflict(DomainError):
+    """Raised when idempotency key is reused with a different payload."""

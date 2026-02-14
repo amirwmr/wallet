@@ -4,7 +4,7 @@ from django.utils import timezone
 from rest_framework.test import APITestCase
 
 from wallets.domain.services import WalletService, WithdrawalService
-from wallets.models import Wallet
+from wallets.models import Transaction, Wallet
 
 
 class WalletPhase4ApiTests(APITestCase):
@@ -87,6 +87,78 @@ class WalletPhase4ApiTests(APITestCase):
             f"/api/wallets/{self.wallet.id}/withdrawals/",
             {"amount": 100, "execute_at": execute_at},
             format="json",
+        )
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.data["status"], 400)
+        self.assertIn("detail", response.data)
+
+    def test_schedule_withdrawal_endpoint_is_idempotent_with_header_key(self):
+        execute_at = (timezone.now() + timedelta(minutes=30)).isoformat()
+        path = f"/api/wallets/{self.wallet.id}/withdrawals/"
+
+        first = self.client.post(
+            path,
+            {"amount": 220, "execute_at": execute_at},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-withdraw-001",
+        )
+        second = self.client.post(
+            path,
+            {"amount": 220, "execute_at": execute_at},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-withdraw-001",
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(first.data["status"], 201)
+        self.assertEqual(second.data["status"], 200)
+        self.assertEqual(
+            first.data["data"]["transaction"]["id"],
+            second.data["data"]["transaction"]["id"],
+        )
+        self.assertEqual(
+            Transaction.objects.filter(idempotency_key="api-withdraw-001").count(),
+            1,
+        )
+
+    def test_schedule_withdrawal_endpoint_rejects_idempotency_payload_conflict(self):
+        execute_at = (timezone.now() + timedelta(minutes=30)).isoformat()
+        path = f"/api/wallets/{self.wallet.id}/withdrawals/"
+
+        first = self.client.post(
+            path,
+            {"amount": 120, "execute_at": execute_at},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-withdraw-002",
+        )
+        second = self.client.post(
+            path,
+            {"amount": 130, "execute_at": execute_at},
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="api-withdraw-002",
+        )
+
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual(second.status_code, 409)
+        self.assertEqual(second.data["status"], 409)
+
+    def test_schedule_withdrawal_endpoint_rejects_idempotency_header_body_mismatch(
+        self,
+    ):
+        execute_at = (timezone.now() + timedelta(minutes=30)).isoformat()
+        path = f"/api/wallets/{self.wallet.id}/withdrawals/"
+
+        response = self.client.post(
+            path,
+            {
+                "amount": 180,
+                "execute_at": execute_at,
+                "idempotency_key": "body-key",
+            },
+            format="json",
+            HTTP_IDEMPOTENCY_KEY="header-key",
         )
 
         self.assertEqual(response.status_code, 400)

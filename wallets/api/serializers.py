@@ -17,6 +17,11 @@ class DepositRequestSerializer(serializers.Serializer):
 class ScheduleWithdrawalRequestSerializer(serializers.Serializer):
     amount = serializers.IntegerField()
     execute_at = serializers.DateTimeField()
+    idempotency_key = serializers.CharField(
+        required=False,
+        allow_blank=False,
+        max_length=128,
+    )
 
 
 class TransactionSerializer(serializers.ModelSerializer):

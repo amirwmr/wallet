@@ -4,7 +4,12 @@ from django.db import transaction
 from django.db.models import F
 from django.utils import timezone
 
-from wallets.domain.exceptions import InvalidTransactionState, WalletNotFound
+from wallets.domain.exceptions import (
+    IdempotencyConflict,
+    InvalidIdempotencyKey,
+    InvalidTransactionState,
+    WalletNotFound,
+)
 from wallets.domain.policies import validate_future_execute_at, validate_positive_amount
 from wallets.integrations.bank_client import BankGateway, TransferResult
 from wallets.integrations.idempotency import (
@@ -44,7 +49,14 @@ class WalletService:
 
 class WithdrawalService:
     @staticmethod
-    def schedule_withdrawal(wallet_id, amount, execute_at):
+    def schedule_withdrawal(
+        wallet_id,
+        amount,
+        execute_at,
+        *,
+        idempotency_key=None,
+        include_created=False,
+    ):
         validated_amount = validate_positive_amount(amount)
         validated_execute_at = validate_future_execute_at(execute_at)
 
@@ -53,14 +65,47 @@ class WithdrawalService:
         except Wallet.DoesNotExist as exc:
             raise WalletNotFound(f"wallet={wallet_id} does not exist") from exc
 
-        tx = Transaction.objects.create(
-            wallet=wallet,
-            type=Transaction.Type.WITHDRAWAL,
-            status=Transaction.Status.SCHEDULED,
-            amount=validated_amount,
-            execute_at=validated_execute_at,
-            idempotency_key=generate_idempotency_key(),
+        if idempotency_key is None:
+            tx = Transaction.objects.create(
+                wallet=wallet,
+                type=Transaction.Type.WITHDRAWAL,
+                status=Transaction.Status.SCHEDULED,
+                amount=validated_amount,
+                execute_at=validated_execute_at,
+                idempotency_key=generate_idempotency_key(),
+            )
+            if include_created:
+                return tx, True
+            return tx
+
+        normalized_idempotency_key = idempotency_key.strip()
+        if not normalized_idempotency_key:
+            raise InvalidIdempotencyKey("idempotency_key cannot be empty")
+
+        tx, created = Transaction.objects.get_or_create(
+            idempotency_key=normalized_idempotency_key,
+            defaults={
+                "wallet": wallet,
+                "type": Transaction.Type.WITHDRAWAL,
+                "status": Transaction.Status.SCHEDULED,
+                "amount": validated_amount,
+                "execute_at": validated_execute_at,
+            },
         )
+
+        if not created:
+            if (
+                tx.type != Transaction.Type.WITHDRAWAL
+                or tx.wallet_id != wallet.id
+                or tx.amount != validated_amount
+                or tx.execute_at != validated_execute_at
+            ):
+                raise IdempotencyConflict(
+                    "idempotency_key already used with a different withdrawal payload"
+                )
+
+        if include_created:
+            return tx, created
         return tx
 
     @staticmethod

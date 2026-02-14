@@ -3,7 +3,13 @@ from datetime import timedelta
 from django.test import TestCase
 from django.utils import timezone
 
-from wallets.domain.exceptions import InvalidAmount, InvalidExecuteAt, WalletNotFound
+from wallets.domain.exceptions import (
+    IdempotencyConflict,
+    InvalidAmount,
+    InvalidExecuteAt,
+    InvalidIdempotencyKey,
+    WalletNotFound,
+)
 from wallets.domain.services import WalletService, WithdrawalService
 from wallets.models import Transaction, Wallet
 
@@ -100,4 +106,60 @@ class WithdrawalServiceScheduleTests(TestCase):
                 wallet_id=999_999,
                 amount=10,
                 execute_at=execute_at,
+            )
+
+    def test_schedule_withdrawal_reuses_existing_transaction_for_same_idempotency_key(
+        self,
+    ):
+        wallet = Wallet.objects.create(balance=100)
+        execute_at = timezone.now() + timedelta(hours=1)
+
+        first = WithdrawalService.schedule_withdrawal(
+            wallet_id=wallet.id,
+            amount=50,
+            execute_at=execute_at,
+            idempotency_key="withdraw-001",
+        )
+        second = WithdrawalService.schedule_withdrawal(
+            wallet_id=wallet.id,
+            amount=50,
+            execute_at=execute_at,
+            idempotency_key="withdraw-001",
+        )
+
+        self.assertEqual(first.id, second.id)
+        self.assertEqual(
+            Transaction.objects.filter(idempotency_key="withdraw-001").count(),
+            1,
+        )
+
+    def test_schedule_withdrawal_rejects_idempotency_key_conflict(self):
+        wallet = Wallet.objects.create(balance=100)
+        execute_at = timezone.now() + timedelta(hours=1)
+
+        WithdrawalService.schedule_withdrawal(
+            wallet_id=wallet.id,
+            amount=50,
+            execute_at=execute_at,
+            idempotency_key="withdraw-002",
+        )
+
+        with self.assertRaises(IdempotencyConflict):
+            WithdrawalService.schedule_withdrawal(
+                wallet_id=wallet.id,
+                amount=70,
+                execute_at=execute_at,
+                idempotency_key="withdraw-002",
+            )
+
+    def test_schedule_withdrawal_rejects_empty_idempotency_key(self):
+        wallet = Wallet.objects.create(balance=100)
+        execute_at = timezone.now() + timedelta(hours=1)
+
+        with self.assertRaises(InvalidIdempotencyKey):
+            WithdrawalService.schedule_withdrawal(
+                wallet_id=wallet.id,
+                amount=50,
+                execute_at=execute_at,
+                idempotency_key="  ",
             )
