@@ -37,6 +37,7 @@ The app loads `.env` automatically when the file exists in the project root.
 - `DEBUG`: `True` or `False`
 - `ALLOWED_HOSTS`: comma-separated hosts
 - `DATABASE_URL`: optional (`postgres://...` or `sqlite://...`)
+- `DB_ENGINE`: defaults to `django.db.backends.sqlite3` when `DATABASE_URL` is empty
 - `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`: used when `DATABASE_URL` is empty
 - `BANK_BASE_URL`: bank mock base URL (default `http://127.0.0.1:8010`)
 - `BANK_TIMEOUT`: bank request timeout in seconds (default `3`)

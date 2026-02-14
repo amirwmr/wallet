@@ -1,14 +1,19 @@
+import logging
+
 from django.db import transaction
 from django.db.models import F
+from django.utils import timezone
 
 from wallets.domain.exceptions import InvalidTransactionState, WalletNotFound
 from wallets.domain.policies import validate_future_execute_at, validate_positive_amount
-from wallets.integrations.bank_client import BankGateway
+from wallets.integrations.bank_client import BankGateway, TransferResult
 from wallets.integrations.idempotency import (
     ensure_transaction_idempotency_key,
     generate_idempotency_key,
 )
 from wallets.models import Transaction, Wallet
+
+logger = logging.getLogger(__name__)
 
 
 class WalletService:
@@ -83,27 +88,50 @@ class WithdrawalService:
                 raise InvalidTransactionState(
                     f"transaction status must be {Transaction.Status.SCHEDULED}, got={tx.status}"
                 )
+            if tx.execute_at and tx.execute_at > timezone.now():
+                raise InvalidTransactionState(
+                    "transaction execute_at is in the future and cannot be executed yet"
+                )
 
             wallet = Wallet.objects.select_for_update().get(pk=tx.wallet_id)
-            tx.status = Transaction.Status.PROCESSING
-            tx.failure_reason = None
-            tx.save(update_fields=["status", "failure_reason", "updated_at"])
-
-            if wallet.balance < tx.amount:
+            debited = Wallet.objects.filter(
+                pk=wallet.pk,
+                balance__gte=tx.amount,
+            ).update(balance=F("balance") - tx.amount)
+            if debited == 0:
                 tx.status = Transaction.Status.FAILED
                 tx.failure_reason = "insufficient_balance"
                 tx.save(update_fields=["status", "failure_reason", "updated_at"])
                 return tx
 
-            Wallet.objects.filter(pk=wallet.pk).update(balance=F("balance") - tx.amount)
             tx.idempotency_key = ensure_transaction_idempotency_key(tx)
-            tx.save(update_fields=["idempotency_key", "updated_at"])
+            tx.status = Transaction.Status.PROCESSING
+            tx.failure_reason = None
+            tx.save(
+                update_fields=[
+                    "idempotency_key",
+                    "status",
+                    "failure_reason",
+                    "updated_at",
+                ]
+            )
 
-        transfer_result = bank_gateway.transfer(
-            idempotency_key=tx.idempotency_key,
-            wallet_owner_ref=str(tx.wallet.uuid),
-            amount=tx.amount,
-        )
+        try:
+            transfer_result = bank_gateway.transfer(
+                idempotency_key=tx.idempotency_key,
+                wallet_owner_ref=str(tx.wallet.uuid),
+                amount=tx.amount,
+            )
+        except Exception as exc:
+            logger.exception(
+                "event=withdrawal_gateway_exception tx_id=%s error=%s",
+                tx.id,
+                exc.__class__.__name__,
+            )
+            transfer_result = TransferResult(
+                success=False,
+                error_reason=f"gateway_exception:{exc.__class__.__name__}",
+            )
 
         with transaction.atomic():
             tx = (
@@ -112,6 +140,10 @@ class WithdrawalService:
                 .get(pk=transaction_id)
             )
             wallet = Wallet.objects.select_for_update().get(pk=tx.wallet_id)
+            if tx.status != Transaction.Status.PROCESSING:
+                raise InvalidTransactionState(
+                    f"transaction status must be {Transaction.Status.PROCESSING}, got={tx.status}"
+                )
 
             if transfer_result.success:
                 tx.status = Transaction.Status.SUCCEEDED

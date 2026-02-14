@@ -13,6 +13,7 @@ from django.utils import timezone
 from wallets.domain.services import WithdrawalService
 from wallets.integrations.bank_client import TransferResult
 from wallets.models import Transaction, Wallet
+from wallets.tasks import execute_withdrawals as execute_withdrawals_module
 from wallets.tasks.execute_withdrawals import execute_due_withdrawals
 
 
@@ -97,6 +98,25 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(tx.failure_reason, "bank_failed")
         self.assertEqual(wallet.balance, 900)
 
+    def test_gateway_exception_marks_failed_and_refunds_wallet(self):
+        wallet = Wallet.objects.create(balance=700)
+        tx = self._schedule_due_withdrawal(wallet, amount=250)
+
+        gateway = Mock()
+        gateway.transfer.side_effect = RuntimeError("unexpected upstream crash")
+
+        summary = execute_due_withdrawals(limit=10, now=timezone.now(), gateway=gateway)
+
+        tx.refresh_from_db()
+        wallet.refresh_from_db()
+
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["succeeded"], 0)
+        self.assertEqual(summary["failed"], 1)
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
+        self.assertEqual(tx.failure_reason, "gateway_exception:RuntimeError")
+        self.assertEqual(wallet.balance, 700)
+
     @override_settings(WITHDRAWAL_PROCESSING_STALE_SECONDS=1)
     def test_reclaims_stale_processing_and_finishes_with_single_debit(self):
         wallet = Wallet.objects.create(balance=1_000)
@@ -159,6 +179,73 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "network_error")
         self.assertEqual(wallet.balance, 1_200)
+
+    @override_settings(
+        EXECUTOR_LOCK_CONTENTION_MAX_RETRIES=3,
+        EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS=0,
+    )
+    def test_retries_after_lock_contention_and_completes_work(self):
+        wallet = Wallet.objects.create(balance=500)
+        tx = self._schedule_due_withdrawal(wallet, amount=200)
+        gateway = Mock()
+        gateway.transfer.return_value = TransferResult(
+            success=True, reference="bank-ok"
+        )
+
+        original_claim = execute_withdrawals_module._claim_next_due_withdrawal
+        calls = {"count": 0}
+
+        def flaky_claim(now):
+            if calls["count"] == 0:
+                calls["count"] += 1
+                raise OperationalError("database is locked")
+            return original_claim(now)
+
+        with patch(
+            "wallets.tasks.execute_withdrawals._claim_next_due_withdrawal",
+            side_effect=flaky_claim,
+        ):
+            summary = execute_due_withdrawals(
+                limit=10, now=timezone.now(), gateway=gateway
+            )
+
+        tx.refresh_from_db()
+        wallet.refresh_from_db()
+
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["succeeded"], 1)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(tx.status, Transaction.Status.SUCCEEDED)
+        self.assertEqual(wallet.balance, 300)
+        gateway.transfer.assert_called_once()
+
+    @override_settings(
+        EXECUTOR_LOCK_CONTENTION_MAX_RETRIES=1,
+        EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS=0,
+    )
+    def test_stops_when_lock_contention_retries_are_exhausted(self):
+        wallet = Wallet.objects.create(balance=400)
+        tx = self._schedule_due_withdrawal(wallet, amount=100)
+        gateway = Mock()
+
+        with patch(
+            "wallets.tasks.execute_withdrawals._claim_next_due_withdrawal",
+            side_effect=OperationalError("database is locked"),
+        ):
+            summary = execute_due_withdrawals(
+                limit=10, now=timezone.now(), gateway=gateway
+            )
+
+        tx.refresh_from_db()
+        wallet.refresh_from_db()
+
+        self.assertEqual(summary["processed"], 0)
+        self.assertEqual(summary["succeeded"], 0)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["insufficient_funds"], 0)
+        self.assertEqual(tx.status, Transaction.Status.SCHEDULED)
+        self.assertEqual(wallet.balance, 400)
+        gateway.transfer.assert_not_called()
 
 
 class ExecuteDueWithdrawalsConcurrencyTests(TransactionTestCase):

@@ -4,6 +4,7 @@ from unittest.mock import Mock
 from django.test import TestCase
 from django.utils import timezone
 
+from wallets.domain.exceptions import InvalidTransactionState
 from wallets.domain.services import WithdrawalService
 from wallets.integrations.bank_client import TransferResult
 from wallets.integrations.idempotency import (
@@ -49,6 +50,14 @@ class IdempotencyHelpersTests(TestCase):
 
 
 class WithdrawalExecuteTests(TestCase):
+    @staticmethod
+    def _force_due(tx):
+        Transaction.objects.filter(pk=tx.pk).update(
+            execute_at=timezone.now() - timedelta(seconds=1)
+        )
+        tx.refresh_from_db()
+        return tx
+
     def test_execute_withdrawal_success_marks_succeeded_and_keeps_debit(self):
         wallet = Wallet.objects.create(balance=1_000)
         tx = WithdrawalService.schedule_withdrawal(
@@ -56,6 +65,7 @@ class WithdrawalExecuteTests(TestCase):
             amount=300,
             execute_at=timezone.now() + timedelta(minutes=10),
         )
+        tx = self._force_due(tx)
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
@@ -86,6 +96,7 @@ class WithdrawalExecuteTests(TestCase):
             amount=200,
             execute_at=timezone.now() + timedelta(minutes=10),
         )
+        tx = self._force_due(tx)
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
@@ -110,6 +121,7 @@ class WithdrawalExecuteTests(TestCase):
             amount=150,
             execute_at=timezone.now() + timedelta(minutes=10),
         )
+        tx = self._force_due(tx)
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
@@ -127,6 +139,27 @@ class WithdrawalExecuteTests(TestCase):
         self.assertEqual(tx.failure_reason, "network_error")
         self.assertEqual(wallet.balance, 1_000)
 
+    def test_execute_withdrawal_gateway_exception_refunds_wallet(self):
+        wallet = Wallet.objects.create(balance=1_000)
+        tx = WithdrawalService.schedule_withdrawal(
+            wallet_id=wallet.id,
+            amount=150,
+            execute_at=timezone.now() + timedelta(minutes=10),
+        )
+        tx = self._force_due(tx)
+
+        gateway = Mock()
+        gateway.transfer.side_effect = RuntimeError("bank process crashed")
+
+        WithdrawalService.execute_withdrawal(tx.id, gateway=gateway)
+
+        tx.refresh_from_db()
+        wallet.refresh_from_db()
+
+        self.assertEqual(tx.status, Transaction.Status.FAILED)
+        self.assertEqual(tx.failure_reason, "gateway_exception:RuntimeError")
+        self.assertEqual(wallet.balance, 1_000)
+
     def test_execute_withdrawal_insufficient_balance_marks_failed_without_gateway_call(
         self,
     ):
@@ -136,6 +169,7 @@ class WithdrawalExecuteTests(TestCase):
             amount=200,
             execute_at=timezone.now() + timedelta(minutes=10),
         )
+        tx = self._force_due(tx)
 
         gateway = Mock()
 
@@ -147,4 +181,23 @@ class WithdrawalExecuteTests(TestCase):
         self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "insufficient_balance")
         self.assertEqual(wallet.balance, 100)
+        gateway.transfer.assert_not_called()
+
+    def test_execute_withdrawal_rejects_when_not_due(self):
+        wallet = Wallet.objects.create(balance=1_000)
+        tx = WithdrawalService.schedule_withdrawal(
+            wallet_id=wallet.id,
+            amount=200,
+            execute_at=timezone.now() + timedelta(minutes=10),
+        )
+
+        gateway = Mock()
+
+        with self.assertRaises(InvalidTransactionState):
+            WithdrawalService.execute_withdrawal(tx.id, gateway=gateway)
+
+        tx.refresh_from_db()
+        wallet.refresh_from_db()
+        self.assertEqual(tx.status, Transaction.Status.SCHEDULED)
+        self.assertEqual(wallet.balance, 1_000)
         gateway.transfer.assert_not_called()
