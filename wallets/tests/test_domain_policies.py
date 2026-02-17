@@ -30,7 +30,7 @@ class ValidateFutureExecuteAtTests(SimpleTestCase):
             validate_future_execute_at("2026-01-01T00:00:00Z")
 
     def test_rejects_naive_datetime(self):
-        naive_dt = datetime.utcnow() + timedelta(minutes=10)
+        naive_dt = datetime.now() + timedelta(minutes=10)
         with self.assertRaises(InvalidExecuteAt):
             validate_future_execute_at(naive_dt)
 

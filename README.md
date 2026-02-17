@@ -41,11 +41,25 @@ The app loads `.env` automatically when the file exists in the project root.
 - `DB_NAME`, `DB_USER`, `DB_PASSWORD`, `DB_HOST`, `DB_PORT`: used when `DATABASE_URL` is empty
 - `BANK_BASE_URL`: bank mock base URL (default `http://127.0.0.1:8010`)
 - `BANK_TIMEOUT`: bank request timeout in seconds (default `3`)
-- `BANK_RETRY_COUNT`: retry attempts for timeout/connection failures (default `2`)
+- `BANK_RETRY_MAX_ATTEMPTS`: max transfer attempts including the first call (default `3`)
+- `BANK_RETRY_BASE_DELAY`: exponential backoff base delay in seconds (default `0.2`)
+- `BANK_RETRY_MAX_DELAY`: max backoff delay cap in seconds (default `3.0`)
+- `BANK_MAX_RPS`: global bank request rate limit per second across workers (`0` disables)
+- `BANK_RATE_LIMIT_REDIS_URL`: Redis URL used by distributed limiter
+- `BANK_RATE_LIMIT_KEY`: Redis key used for limiter bucket state
+- `BANK_REDIS_SOCKET_CONNECT_TIMEOUT`: Redis connect timeout in seconds (default `0.5`)
+- `BANK_REDIS_SOCKET_TIMEOUT`: Redis read timeout in seconds (default `0.5`)
+- `BANK_HTTP_MAX_CONNECTIONS`: number of HTTP host pools in requests adapter
+- `BANK_HTTP_MAX_KEEPALIVE`: max keep-alive connections per host pool
+- `BANK_STATUS_URL_TEMPLATE`: optional reconciliation status URL template
 - `BANK_HONORS_IDEMPOTENCY`: if `False`, stale `PROCESSING` withdrawals are moved to `UNKNOWN` and queued for reconciliation instead of re-sending transfer (default `True`)
 - `WITHDRAWAL_PROCESSING_STALE_SECONDS`: how long before reclaiming stale `PROCESSING` withdrawals (default `30`)
+- `WITHDRAWAL_PROCESSING_TIMEOUT_SECONDS`: timeout for `PROCESSING` before reconciliation sweep (default `30`)
 - `EXECUTOR_LOCK_CONTENTION_MAX_RETRIES`: max consecutive lock-contention retries before executor exits (default `20`)
 - `EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS`: backoff sleep per contention retry (default `0.05`)
+- `WORKER_LOOP_INTERVAL`: base delay between loop iterations (default `2.0`)
+- `WORKER_STARTUP_JITTER_MAX`: random startup delay cap for worker desync (default `0.0`)
+- `WORKER_LOOP_JITTER_MAX`: random jitter added to each loop sleep (default `0.5`)
 - `WALLET_LOG_LEVEL`: log level for executor and bank gateway (default `INFO`)
 
 Production guardrails in settings:
@@ -123,11 +137,12 @@ When lock contention happens under concurrent workers, the executor now retries 
 ## Bank Integration Behavior
 - Request: `POST {BANK_BASE_URL}/`
 - Timeout: `BANK_TIMEOUT`
-- Retries: `BANK_RETRY_COUNT` for timeout/connection failures
+- Retries: `BANK_RETRY_MAX_ATTEMPTS` with exponential backoff + full jitter (`BANK_RETRY_BASE_DELAY`, `BANK_RETRY_MAX_DELAY`)
+- Rate limiting: distributed Redis limiter controlled by `BANK_MAX_RPS`
 - Response handling:
   - success only when HTTP 2xx and payload indicates success
-  - `503` or payload failure -> transfer failure
-  - network exception after retries -> transfer failure (`network_error`)
+  - non-2xx failures -> `FINAL_FAILURE` unless response is ambiguous
+  - timeout/connection/ambiguous/5xx -> `UNKNOWN` (queued for reconciliation)
 
 ## Test and Quality Commands
 ```bash

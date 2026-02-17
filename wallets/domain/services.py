@@ -11,12 +11,16 @@ from wallets.domain.exceptions import (
     WalletNotFound,
 )
 from wallets.domain.policies import validate_future_execute_at, validate_positive_amount
-from wallets.integrations.bank_client import BankGateway, TransferResult
+from wallets.integrations.bank_client import (
+    BankGateway,
+    TransferOutcome,
+    TransferResult,
+)
 from wallets.integrations.idempotency import (
     ensure_transaction_idempotency_key,
     generate_idempotency_key,
 )
-from wallets.models import Transaction, Wallet
+from wallets.models import Transaction, Wallet, WithdrawalReconciliationTask
 
 logger = logging.getLogger(__name__)
 
@@ -202,12 +206,12 @@ class WithdrawalService:
             )
         except Exception as exc:
             logger.exception(
-                "event=withdrawal_gateway_exception tx_id=%s error=%s",
+                "event=withdrawal_gateway_exception worker_role=executor tx_id=%s idempotency_key=%s error=%s",
                 tx.id,
+                tx.idempotency_key,
                 exc.__class__.__name__,
             )
-            transfer_result = TransferResult(
-                success=False,
+            transfer_result = TransferResult.unknown(
                 error_reason=f"gateway_exception:{exc.__class__.__name__}",
             )
 
@@ -223,7 +227,7 @@ class WithdrawalService:
                     f"transaction status must be {Transaction.Status.PROCESSING}, got={tx.status}"
                 )
 
-            if transfer_result.success:
+            if transfer_result.outcome == TransferOutcome.SUCCESS:
                 tx.status = Transaction.Status.SUCCEEDED
                 tx.external_reference = transfer_result.reference
                 tx.bank_reference = transfer_result.reference
@@ -236,6 +240,16 @@ class WithdrawalService:
                         "failure_reason",
                         "updated_at",
                     ]
+                )
+                return tx
+
+            if transfer_result.outcome == TransferOutcome.UNKNOWN:
+                tx.status = Transaction.Status.UNKNOWN
+                tx.failure_reason = transfer_result.error_reason or "UNKNOWN_TRANSFER"
+                tx.save(update_fields=["status", "failure_reason", "updated_at"])
+                WithdrawalReconciliationTask.objects.get_or_create(
+                    transaction=tx,
+                    defaults={"reason": "UNKNOWN_TRANSFER_OUTCOME"},
                 )
                 return tx
 

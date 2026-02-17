@@ -22,7 +22,9 @@ class HttpClientTests(SimpleTestCase):
             session=session,
             connect_timeout=0.5,
             read_timeout=2.0,
-            max_retries=2,
+            max_attempts=3,
+            retry_base_delay=0,
+            retry_max_delay=0,
         )
 
         result = client.post_json("http://bank.local/", json={"amount": 100})
@@ -36,7 +38,12 @@ class HttpClientTests(SimpleTestCase):
         session = Mock()
         session.post.side_effect = requests.Timeout("always timeout")
 
-        client = HttpClient(session=session, max_retries=1)
+        client = HttpClient(
+            session=session,
+            max_attempts=2,
+            retry_base_delay=0,
+            retry_max_delay=0,
+        )
 
         with self.assertRaises(NetworkRequestFailed):
             client.post_json("http://bank.local/", json={"amount": 100})

@@ -8,7 +8,11 @@ from django.db import OperationalError, connection, transaction
 from django.db.models import F
 from django.utils import timezone
 
-from wallets.integrations.bank_client import BankGateway, TransferResult
+from wallets.integrations.bank_client import (
+    BankGateway,
+    TransferOutcome,
+    TransferResult,
+)
 from wallets.integrations.idempotency import ensure_transaction_idempotency_key
 from wallets.models import Transaction, Wallet, WithdrawalReconciliationTask
 
@@ -29,6 +33,33 @@ def _with_execution_lock(queryset):
             return queryset.select_for_update(skip_locked=True)
         return queryset.select_for_update()
     return queryset
+
+
+def _queue_reconciliation_task(transaction, *, reason):
+    task, created = WithdrawalReconciliationTask.objects.get_or_create(
+        transaction=transaction,
+        defaults={"reason": reason},
+    )
+    return task, created
+
+
+def _mark_unknown_and_queue_reconciliation(transaction, *, reason):
+    transaction.status = Transaction.Status.UNKNOWN
+    transaction.failure_reason = reason
+    transaction.save(update_fields=["status", "failure_reason", "updated_at"])
+    task, created = _queue_reconciliation_task(
+        transaction,
+        reason="UNKNOWN_TRANSFER_OUTCOME",
+    )
+    logger.warning(
+        "event=withdrawal_marked_unknown worker_role=executor tx_id=%s idempotency_key=%s reason=%s reconciliation_task_id=%s reconciliation_created=%s",
+        transaction.id,
+        transaction.idempotency_key,
+        reason,
+        task.id,
+        created,
+    )
+    return task, created
 
 
 def _claim_next_due_withdrawal(now):
@@ -52,8 +83,9 @@ def _claim_next_due_withdrawal(now):
             tx.failure_reason = "INSUFFICIENT_FUNDS"
             tx.save(update_fields=["status", "failure_reason", "updated_at"])
             logger.info(
-                "event=withdrawal_failed_insufficient_funds tx_id=%s wallet_id=%s amount=%s",
+                "event=withdrawal_failed_insufficient_funds worker_role=executor tx_id=%s idempotency_key=%s wallet_id=%s amount=%s",
                 tx.id,
+                tx.idempotency_key,
                 tx.wallet_id,
                 tx.amount,
             )
@@ -66,7 +98,7 @@ def _claim_next_due_withdrawal(now):
             update_fields=["idempotency_key", "status", "failure_reason", "updated_at"]
         )
         logger.info(
-            "event=withdrawal_claimed tx_id=%s wallet_id=%s amount=%s idempotency_key=%s claim_type=scheduled",
+            "event=withdrawal_claimed worker_role=executor tx_id=%s wallet_id=%s amount=%s idempotency_key=%s claim_type=scheduled",
             tx.id,
             tx.wallet_id,
             tx.amount,
@@ -102,7 +134,7 @@ def _claim_stale_processing_withdrawal(now, *, stale_after_seconds):
         tx.save(update_fields=["idempotency_key", "failure_reason", "updated_at"])
 
         logger.warning(
-            "event=withdrawal_reclaimed_processing tx_id=%s wallet_id=%s idempotency_key=%s",
+            "event=withdrawal_reclaimed_processing worker_role=executor tx_id=%s wallet_id=%s idempotency_key=%s",
             tx.id,
             tx.wallet_id,
             tx.idempotency_key,
@@ -131,18 +163,18 @@ def _queue_stale_processing_for_reconciliation(now, *, stale_after_seconds):
         if tx is None:
             return None
 
-        tx.status = Transaction.Status.UNKNOWN
-        tx.failure_reason = "RECONCILIATION_REQUIRED"
-        tx.save(update_fields=["status", "failure_reason", "updated_at"])
-
-        task, created = WithdrawalReconciliationTask.objects.get_or_create(
-            transaction=tx,
-            defaults={"reason": "STALE_PROCESSING_WITHOUT_BANK_IDEMPOTENCY"},
+        task, created = _mark_unknown_and_queue_reconciliation(
+            tx,
+            reason="RECONCILIATION_REQUIRED",
         )
+        if created:
+            task.reason = "STALE_PROCESSING_WITHOUT_BANK_IDEMPOTENCY"
+            task.save(update_fields=["reason", "updated_at"])
 
         logger.warning(
-            "event=withdrawal_reconciliation_queued tx_id=%s wallet_id=%s queue_created=%s task_id=%s",
+            "event=withdrawal_reconciliation_queued worker_role=executor tx_id=%s idempotency_key=%s wallet_id=%s queue_created=%s task_id=%s",
             tx.id,
+            tx.idempotency_key,
             tx.wallet_id,
             created,
             task.id,
@@ -157,13 +189,14 @@ def _finalize_claimed_withdrawal(claim, transfer_result):
 
         if tx.status != Transaction.Status.PROCESSING:
             logger.info(
-                "event=withdrawal_finalize_skipped tx_id=%s current_status=%s",
+                "event=withdrawal_finalize_skipped worker_role=executor tx_id=%s idempotency_key=%s current_status=%s",
                 tx.id,
+                tx.idempotency_key,
                 tx.status,
             )
             return "skipped"
 
-        if transfer_result.success:
+        if transfer_result.outcome == TransferOutcome.SUCCESS:
             tx.status = Transaction.Status.SUCCEEDED
             tx.external_reference = transfer_result.reference
             tx.bank_reference = transfer_result.reference
@@ -178,20 +211,29 @@ def _finalize_claimed_withdrawal(claim, transfer_result):
                 ]
             )
             logger.info(
-                "event=withdrawal_succeeded tx_id=%s wallet_id=%s reference=%s",
+                "event=withdrawal_succeeded worker_role=executor tx_id=%s idempotency_key=%s wallet_id=%s reference=%s",
                 tx.id,
+                tx.idempotency_key,
                 tx.wallet_id,
                 transfer_result.reference,
             )
             return "succeeded"
+
+        if transfer_result.outcome == TransferOutcome.UNKNOWN:
+            _mark_unknown_and_queue_reconciliation(
+                tx,
+                reason=transfer_result.error_reason or "UNKNOWN_TRANSFER_OUTCOME",
+            )
+            return "unknown"
 
         Wallet.objects.filter(pk=wallet.pk).update(balance=F("balance") + tx.amount)
         tx.status = Transaction.Status.FAILED
         tx.failure_reason = transfer_result.error_reason or "BANK_TRANSFER_FAILED"
         tx.save(update_fields=["status", "failure_reason", "updated_at"])
         logger.warning(
-            "event=withdrawal_failed_refunded tx_id=%s wallet_id=%s reason=%s amount=%s",
+            "event=withdrawal_failed_refunded worker_role=executor tx_id=%s idempotency_key=%s wallet_id=%s reason=%s amount=%s",
             tx.id,
+            tx.idempotency_key,
             tx.wallet_id,
             tx.failure_reason,
             tx.amount,
@@ -209,6 +251,7 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
             "failed": 0,
             "insufficient_funds": 0,
             "reconciliation_queued": 0,
+            "unknown": 0,
         }
 
     bank_gateway = gateway or BankGateway()
@@ -231,6 +274,7 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
     failed = 0
     insufficient_funds = 0
     reconciliation_queued = 0
+    unknown = 0
     lock_contention_retries = 0
 
     while processed < limit:
@@ -250,7 +294,7 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
         except OperationalError:
             lock_contention_retries += 1
             logger.warning(
-                "event=executor_lock_contention limit=%s retry=%s max_retries=%s",
+                "event=executor_lock_contention limit=%s retry=%s max_lock_contention_retries=%s",
                 limit,
                 lock_contention_retries,
                 max_lock_contention_retries,
@@ -283,8 +327,9 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
 
         claim = claim_result["claim"]
         logger.info(
-            "event=withdrawal_execution_start tx_id=%s wallet_owner_ref=%s amount=%s",
+            "event=withdrawal_execution_start worker_role=executor tx_id=%s idempotency_key=%s wallet_owner_ref=%s amount=%s",
             claim.transaction_id,
+            claim.idempotency_key,
             claim.wallet_owner_ref,
             claim.amount,
         )
@@ -294,15 +339,16 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
                 idempotency_key=claim.idempotency_key,
                 wallet_owner_ref=claim.wallet_owner_ref,
                 amount=claim.amount,
+                transfer_id=claim.transaction_id,
             )
         except Exception as exc:
-            transfer_result = TransferResult(
-                success=False,
+            transfer_result = TransferResult.unknown(
                 error_reason=f"gateway_exception:{exc.__class__.__name__}",
             )
             logger.exception(
-                "event=executor_gateway_exception tx_id=%s error=%s",
+                "event=executor_gateway_exception worker_role=executor tx_id=%s idempotency_key=%s error=%s",
                 claim.transaction_id,
+                claim.idempotency_key,
                 exc.__class__.__name__,
             )
 
@@ -313,6 +359,10 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
         elif finalize_result == "failed":
             failed += 1
             processed += 1
+        elif finalize_result == "unknown":
+            unknown += 1
+            reconciliation_queued += 1
+            processed += 1
 
     summary = {
         "processed": processed,
@@ -320,13 +370,15 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
         "failed": failed,
         "insufficient_funds": insufficient_funds,
         "reconciliation_queued": reconciliation_queued,
+        "unknown": unknown,
     }
     logger.info(
-        "event=executor_end processed=%s succeeded=%s failed=%s insufficient_funds=%s reconciliation_queued=%s",
+        "event=executor_end worker_role=executor processed=%s succeeded=%s failed=%s insufficient_funds=%s reconciliation_queued=%s unknown=%s",
         summary["processed"],
         summary["succeeded"],
         summary["failed"],
         summary["insufficient_funds"],
         summary["reconciliation_queued"],
+        summary["unknown"],
     )
     return summary

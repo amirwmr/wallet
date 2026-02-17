@@ -6,12 +6,12 @@ from django.utils import timezone
 
 from wallets.domain.exceptions import InvalidTransactionState
 from wallets.domain.services import WithdrawalService
-from wallets.integrations.bank_client import TransferResult
+from wallets.integrations.bank_client import TransferOutcome, TransferResult
 from wallets.integrations.idempotency import (
     ensure_transaction_idempotency_key,
     generate_idempotency_key,
 )
-from wallets.models import Transaction, Wallet
+from wallets.models import Transaction, Wallet, WithdrawalReconciliationTask
 
 
 class IdempotencyHelpersTests(TestCase):
@@ -69,7 +69,7 @@ class WithdrawalExecuteTests(TestCase):
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=True,
+            outcome=TransferOutcome.SUCCESS,
             reference="bank-ref-1",
             error_reason=None,
         )
@@ -100,7 +100,7 @@ class WithdrawalExecuteTests(TestCase):
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=False,
+            outcome=TransferOutcome.FINAL_FAILURE,
             reference=None,
             error_reason="bank_unavailable",
         )
@@ -125,7 +125,7 @@ class WithdrawalExecuteTests(TestCase):
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=False,
+            outcome=TransferOutcome.FINAL_FAILURE,
             reference=None,
             error_reason="network_error",
         )
@@ -155,10 +155,12 @@ class WithdrawalExecuteTests(TestCase):
 
         tx.refresh_from_db()
         wallet.refresh_from_db()
+        task = WithdrawalReconciliationTask.objects.get(transaction=tx)
 
-        self.assertEqual(tx.status, Transaction.Status.FAILED)
+        self.assertEqual(tx.status, Transaction.Status.UNKNOWN)
         self.assertEqual(tx.failure_reason, "gateway_exception:RuntimeError")
-        self.assertEqual(wallet.balance, 1_000)
+        self.assertEqual(wallet.balance, 850)
+        self.assertEqual(task.status, WithdrawalReconciliationTask.Status.PENDING)
 
     def test_execute_withdrawal_insufficient_balance_marks_failed_without_gateway_call(
         self,

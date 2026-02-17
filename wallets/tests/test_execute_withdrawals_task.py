@@ -11,7 +11,7 @@ from django.test.utils import override_settings
 from django.utils import timezone
 
 from wallets.domain.services import WithdrawalService
-from wallets.integrations.bank_client import TransferResult
+from wallets.integrations.bank_client import TransferOutcome, TransferResult
 from wallets.models import Transaction, Wallet, WithdrawalReconciliationTask
 from wallets.tasks import execute_withdrawals as execute_withdrawals_module
 from wallets.tasks.execute_withdrawals import execute_due_withdrawals
@@ -35,7 +35,8 @@ class ExecuteDueWithdrawalsTests(TestCase):
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=True, reference="bank-ref-300"
+            outcome=TransferOutcome.SUCCESS,
+            reference="bank-ref-300",
         )
 
         summary = execute_due_withdrawals(limit=10, now=timezone.now(), gateway=gateway)
@@ -55,6 +56,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
             idempotency_key=tx.idempotency_key,
             wallet_owner_ref=str(wallet.uuid),
             amount=300,
+            transfer_id=tx.id,
         )
 
     def test_marks_failed_with_insufficient_funds_at_execution_time(self):
@@ -83,7 +85,8 @@ class ExecuteDueWithdrawalsTests(TestCase):
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=False, error_reason="bank_failed"
+            outcome=TransferOutcome.FINAL_FAILURE,
+            error_reason="bank_failed",
         )
 
         summary = execute_due_withdrawals(limit=10, now=timezone.now(), gateway=gateway)
@@ -109,13 +112,17 @@ class ExecuteDueWithdrawalsTests(TestCase):
 
         tx.refresh_from_db()
         wallet.refresh_from_db()
+        task = WithdrawalReconciliationTask.objects.get(transaction=tx)
 
         self.assertEqual(summary["processed"], 1)
         self.assertEqual(summary["succeeded"], 0)
-        self.assertEqual(summary["failed"], 1)
-        self.assertEqual(tx.status, Transaction.Status.FAILED)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["unknown"], 1)
+        self.assertEqual(summary["reconciliation_queued"], 1)
+        self.assertEqual(tx.status, Transaction.Status.UNKNOWN)
         self.assertEqual(tx.failure_reason, "gateway_exception:RuntimeError")
-        self.assertEqual(wallet.balance, 700)
+        self.assertEqual(wallet.balance, 450)
+        self.assertEqual(task.status, WithdrawalReconciliationTask.Status.PENDING)
 
     @override_settings(WITHDRAWAL_PROCESSING_STALE_SECONDS=1)
     def test_reclaims_stale_processing_and_finishes_with_single_debit(self):
@@ -130,7 +137,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=True,
+            outcome=TransferOutcome.SUCCESS,
             reference="bank-ref-stale",
         )
 
@@ -149,6 +156,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
             idempotency_key=tx.idempotency_key,
             wallet_owner_ref=str(wallet.uuid),
             amount=250,
+            transfer_id=tx.id,
         )
 
     @override_settings(WITHDRAWAL_PROCESSING_STALE_SECONDS=1)
@@ -164,7 +172,7 @@ class ExecuteDueWithdrawalsTests(TestCase):
 
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=False,
+            outcome=TransferOutcome.FINAL_FAILURE,
             error_reason="network_error",
         )
 
@@ -179,6 +187,32 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "network_error")
         self.assertEqual(wallet.balance, 1_200)
+
+    def test_unknown_transfer_queues_reconciliation_without_refund(self):
+        wallet = Wallet.objects.create(balance=900)
+        tx = self._schedule_due_withdrawal(wallet, amount=400)
+
+        gateway = Mock()
+        gateway.transfer.return_value = TransferResult(
+            outcome=TransferOutcome.UNKNOWN,
+            error_reason="network_timeout",
+        )
+
+        summary = execute_due_withdrawals(limit=10, now=timezone.now(), gateway=gateway)
+
+        tx.refresh_from_db()
+        wallet.refresh_from_db()
+        task = WithdrawalReconciliationTask.objects.get(transaction=tx)
+
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["succeeded"], 0)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["unknown"], 1)
+        self.assertEqual(summary["reconciliation_queued"], 1)
+        self.assertEqual(tx.status, Transaction.Status.UNKNOWN)
+        self.assertEqual(tx.failure_reason, "network_timeout")
+        self.assertEqual(wallet.balance, 500)
+        self.assertEqual(task.status, WithdrawalReconciliationTask.Status.PENDING)
 
     @override_settings(
         WITHDRAWAL_PROCESSING_STALE_SECONDS=1,
@@ -253,7 +287,8 @@ class ExecuteDueWithdrawalsTests(TestCase):
         tx = self._schedule_due_withdrawal(wallet, amount=200)
         gateway = Mock()
         gateway.transfer.return_value = TransferResult(
-            success=True, reference="bank-ok"
+            outcome=TransferOutcome.SUCCESS,
+            reference="bank-ok",
         )
 
         original_claim = execute_withdrawals_module._claim_next_due_withdrawal
@@ -337,7 +372,10 @@ class ExecuteDueWithdrawalsConcurrencyTests(TransactionTestCase):
         class AlwaysSuccessGateway:
             @staticmethod
             def transfer(idempotency_key, wallet_owner_ref=None, amount=None):
-                return TransferResult(success=True, reference=f"ref-{idempotency_key}")
+                return TransferResult(
+                    outcome=TransferOutcome.SUCCESS,
+                    reference=f"ref-{idempotency_key}",
+                )
 
         def worker():
             close_old_connections()

@@ -115,19 +115,56 @@ REST_FRAMEWORK = {
 
 BANK_BASE_URL = os.getenv("BANK_BASE_URL", "http://127.0.0.1:8010")
 BANK_TIMEOUT = env_float("BANK_TIMEOUT", default=3.0)
-BANK_RETRY_COUNT = env_int("BANK_RETRY_COUNT", default=2)
 BANK_HONORS_IDEMPOTENCY = env_bool("BANK_HONORS_IDEMPOTENCY", default=True)
+BANK_RETRY_MAX_ATTEMPTS = env_int("BANK_RETRY_MAX_ATTEMPTS", default=3)
+BANK_RETRY_BASE_DELAY = env_float("BANK_RETRY_BASE_DELAY", default=0.2)
+BANK_RETRY_MAX_DELAY = env_float("BANK_RETRY_MAX_DELAY", default=3.0)
+BANK_MAX_RPS = env_float("BANK_MAX_RPS", default=0.0)
+BANK_RATE_LIMIT_REDIS_URL = os.getenv(
+    "BANK_RATE_LIMIT_REDIS_URL",
+    "redis://127.0.0.1:6379/0",
+)
+BANK_RATE_LIMIT_KEY = os.getenv("BANK_RATE_LIMIT_KEY", "wallet:bank:rate_limit")
+BANK_REDIS_SOCKET_CONNECT_TIMEOUT = env_float(
+    "BANK_REDIS_SOCKET_CONNECT_TIMEOUT", default=0.5
+)
+BANK_REDIS_SOCKET_TIMEOUT = env_float("BANK_REDIS_SOCKET_TIMEOUT", default=0.5)
+BANK_HTTP_MAX_CONNECTIONS = env_int("BANK_HTTP_MAX_CONNECTIONS", default=10)
+BANK_HTTP_MAX_KEEPALIVE = env_int("BANK_HTTP_MAX_KEEPALIVE", default=10)
+BANK_STATUS_URL_TEMPLATE = os.getenv("BANK_STATUS_URL_TEMPLATE", "").strip()
 
 if BANK_TIMEOUT <= 0:
     raise ImproperlyConfigured("BANK_TIMEOUT must be greater than zero")
-if BANK_RETRY_COUNT < 0:
-    raise ImproperlyConfigured("BANK_RETRY_COUNT must be >= 0")
+if BANK_RETRY_MAX_ATTEMPTS < 1:
+    raise ImproperlyConfigured("BANK_RETRY_MAX_ATTEMPTS must be >= 1")
+if BANK_RETRY_BASE_DELAY < 0:
+    raise ImproperlyConfigured("BANK_RETRY_BASE_DELAY must be >= 0")
+if BANK_RETRY_MAX_DELAY < 0:
+    raise ImproperlyConfigured("BANK_RETRY_MAX_DELAY must be >= 0")
+if BANK_RETRY_MAX_DELAY < BANK_RETRY_BASE_DELAY:
+    raise ImproperlyConfigured("BANK_RETRY_MAX_DELAY must be >= BANK_RETRY_BASE_DELAY")
+if BANK_MAX_RPS < 0:
+    raise ImproperlyConfigured("BANK_MAX_RPS must be >= 0")
+if BANK_REDIS_SOCKET_CONNECT_TIMEOUT <= 0:
+    raise ImproperlyConfigured("BANK_REDIS_SOCKET_CONNECT_TIMEOUT must be > 0")
+if BANK_REDIS_SOCKET_TIMEOUT <= 0:
+    raise ImproperlyConfigured("BANK_REDIS_SOCKET_TIMEOUT must be > 0")
+if BANK_HTTP_MAX_CONNECTIONS < 1:
+    raise ImproperlyConfigured("BANK_HTTP_MAX_CONNECTIONS must be >= 1")
+if BANK_HTTP_MAX_KEEPALIVE < 1:
+    raise ImproperlyConfigured("BANK_HTTP_MAX_KEEPALIVE must be >= 1")
 
 WITHDRAWAL_PROCESSING_STALE_SECONDS = env_int(
     "WITHDRAWAL_PROCESSING_STALE_SECONDS", default=30
 )
 if WITHDRAWAL_PROCESSING_STALE_SECONDS < 1:
     raise ImproperlyConfigured("WITHDRAWAL_PROCESSING_STALE_SECONDS must be >= 1")
+WITHDRAWAL_PROCESSING_TIMEOUT_SECONDS = env_int(
+    "WITHDRAWAL_PROCESSING_TIMEOUT_SECONDS",
+    default=WITHDRAWAL_PROCESSING_STALE_SECONDS,
+)
+if WITHDRAWAL_PROCESSING_TIMEOUT_SECONDS < 1:
+    raise ImproperlyConfigured("WITHDRAWAL_PROCESSING_TIMEOUT_SECONDS must be >= 1")
 
 EXECUTOR_LOCK_CONTENTION_MAX_RETRIES = env_int(
     "EXECUTOR_LOCK_CONTENTION_MAX_RETRIES", default=20
@@ -140,6 +177,15 @@ EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS = env_float(
 )
 if EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS < 0:
     raise ImproperlyConfigured("EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS must be >= 0")
+WORKER_LOOP_INTERVAL = env_float("WORKER_LOOP_INTERVAL", default=2.0)
+if WORKER_LOOP_INTERVAL < 0:
+    raise ImproperlyConfigured("WORKER_LOOP_INTERVAL must be >= 0")
+WORKER_STARTUP_JITTER_MAX = env_float("WORKER_STARTUP_JITTER_MAX", default=0.0)
+if WORKER_STARTUP_JITTER_MAX < 0:
+    raise ImproperlyConfigured("WORKER_STARTUP_JITTER_MAX must be >= 0")
+WORKER_LOOP_JITTER_MAX = env_float("WORKER_LOOP_JITTER_MAX", default=0.5)
+if WORKER_LOOP_JITTER_MAX < 0:
+    raise ImproperlyConfigured("WORKER_LOOP_JITTER_MAX must be >= 0")
 
 LOG_LEVEL = os.getenv("WALLET_LOG_LEVEL", "INFO").upper()
 LOGGING = {
