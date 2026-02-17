@@ -46,7 +46,8 @@ class Command(BaseCommand):
                     (
                         "withdrawal executor run completed: "
                         f"processed={summary['processed']} succeeded={summary['succeeded']} "
-                        f"failed={summary['failed']} insufficient_funds={summary['insufficient_funds']}"
+                        f"failed={summary['failed']} insufficient_funds={summary['insufficient_funds']} "
+                        f"reconciliation_queued={summary.get('reconciliation_queued', 0)}"
                     )
                 )
             )

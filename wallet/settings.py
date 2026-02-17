@@ -116,6 +116,7 @@ REST_FRAMEWORK = {
 BANK_BASE_URL = os.getenv("BANK_BASE_URL", "http://127.0.0.1:8010")
 BANK_TIMEOUT = env_float("BANK_TIMEOUT", default=3.0)
 BANK_RETRY_COUNT = env_int("BANK_RETRY_COUNT", default=2)
+BANK_HONORS_IDEMPOTENCY = env_bool("BANK_HONORS_IDEMPOTENCY", default=True)
 
 if BANK_TIMEOUT <= 0:
     raise ImproperlyConfigured("BANK_TIMEOUT must be greater than zero")

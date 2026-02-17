@@ -9,7 +9,7 @@ A Django + DRF wallet service with a transaction ledger, scheduled withdrawals, 
 - Validates withdrawal balance at execution time (not schedule time)
 - Executes due withdrawals safely under concurrent workers
 - Calls a third-party bank service with retries and idempotency
-- Keeps transaction lifecycle auditable: `SCHEDULED -> PROCESSING -> SUCCEEDED | FAILED`
+- Keeps transaction lifecycle auditable: `SCHEDULED -> PROCESSING -> SUCCEEDED | FAILED | UNKNOWN`
 
 ## Runtime and Tooling Versions
 - Python: `>=3.10` (tested with `3.14.x`)
@@ -42,6 +42,7 @@ The app loads `.env` automatically when the file exists in the project root.
 - `BANK_BASE_URL`: bank mock base URL (default `http://127.0.0.1:8010`)
 - `BANK_TIMEOUT`: bank request timeout in seconds (default `3`)
 - `BANK_RETRY_COUNT`: retry attempts for timeout/connection failures (default `2`)
+- `BANK_HONORS_IDEMPOTENCY`: if `False`, stale `PROCESSING` withdrawals are moved to `UNKNOWN` and queued for reconciliation instead of re-sending transfer (default `True`)
 - `WITHDRAWAL_PROCESSING_STALE_SECONDS`: how long before reclaiming stale `PROCESSING` withdrawals (default `30`)
 - `EXECUTOR_LOCK_CONTENTION_MAX_RETRIES`: max consecutive lock-contention retries before executor exits (default `20`)
 - `EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS`: backoff sleep per contention retry (default `0.05`)
@@ -115,7 +116,8 @@ When lock contention happens under concurrent workers, the executor now retries 
 - Debit uses `balance__gte` conditional update, so overdraft cannot happen.
 - Failed bank calls mark transaction `FAILED` and refund the wallet.
 - Each withdrawal has a unique `idempotency_key`; replays use the same key.
-- Stale `PROCESSING` rows are reclaimed and retried safely to avoid stuck debits.
+- Stale `PROCESSING` rows are reclaimed and retried when bank idempotency is trusted (`BANK_HONORS_IDEMPOTENCY=True`).
+- If bank idempotency is not trusted (`BANK_HONORS_IDEMPOTENCY=False`), stale `PROCESSING` rows are moved to `UNKNOWN` and queued for reconciliation without sending a second transfer request.
 - Lock contention is handled with bounded retry + backoff to reduce missed throughput under load.
 
 ## Bank Integration Behavior

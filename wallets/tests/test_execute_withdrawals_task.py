@@ -12,7 +12,7 @@ from django.utils import timezone
 
 from wallets.domain.services import WithdrawalService
 from wallets.integrations.bank_client import TransferResult
-from wallets.models import Transaction, Wallet
+from wallets.models import Transaction, Wallet, WithdrawalReconciliationTask
 from wallets.tasks import execute_withdrawals as execute_withdrawals_module
 from wallets.tasks.execute_withdrawals import execute_due_withdrawals
 
@@ -179,6 +179,70 @@ class ExecuteDueWithdrawalsTests(TestCase):
         self.assertEqual(tx.status, Transaction.Status.FAILED)
         self.assertEqual(tx.failure_reason, "network_error")
         self.assertEqual(wallet.balance, 1_200)
+
+    @override_settings(
+        WITHDRAWAL_PROCESSING_STALE_SECONDS=1,
+        BANK_HONORS_IDEMPOTENCY=False,
+    )
+    def test_stale_processing_queues_reconciliation_when_bank_is_not_idempotent(self):
+        wallet = Wallet.objects.create(balance=1_200)
+        tx = self._schedule_due_withdrawal(wallet, amount=200)
+
+        Transaction.objects.filter(pk=tx.pk).update(
+            status=Transaction.Status.PROCESSING,
+            updated_at=timezone.now() - timedelta(seconds=120),
+        )
+        Wallet.objects.filter(pk=wallet.pk).update(balance=1_000)
+
+        gateway = Mock()
+
+        summary = execute_due_withdrawals(limit=10, now=timezone.now(), gateway=gateway)
+
+        tx.refresh_from_db()
+        wallet.refresh_from_db()
+        task = WithdrawalReconciliationTask.objects.get(transaction=tx)
+
+        self.assertEqual(summary["processed"], 1)
+        self.assertEqual(summary["succeeded"], 0)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(summary["insufficient_funds"], 0)
+        self.assertEqual(summary["reconciliation_queued"], 1)
+        self.assertEqual(tx.status, Transaction.Status.UNKNOWN)
+        self.assertEqual(tx.failure_reason, "RECONCILIATION_REQUIRED")
+        self.assertEqual(wallet.balance, 1_000)
+        self.assertEqual(task.status, WithdrawalReconciliationTask.Status.PENDING)
+        self.assertEqual(task.reason, "STALE_PROCESSING_WITHOUT_BANK_IDEMPOTENCY")
+        gateway.transfer.assert_not_called()
+
+    @override_settings(
+        WITHDRAWAL_PROCESSING_STALE_SECONDS=1,
+        BANK_HONORS_IDEMPOTENCY=False,
+    )
+    def test_stale_processing_creates_single_reconciliation_task(self):
+        wallet = Wallet.objects.create(balance=1_200)
+        tx = self._schedule_due_withdrawal(wallet, amount=200)
+
+        Transaction.objects.filter(pk=tx.pk).update(
+            status=Transaction.Status.PROCESSING,
+            updated_at=timezone.now() - timedelta(seconds=120),
+        )
+        Wallet.objects.filter(pk=wallet.pk).update(balance=1_000)
+
+        gateway = Mock()
+
+        first_summary = execute_due_withdrawals(
+            limit=10, now=timezone.now(), gateway=gateway
+        )
+        second_summary = execute_due_withdrawals(
+            limit=10, now=timezone.now(), gateway=gateway
+        )
+
+        self.assertEqual(first_summary["reconciliation_queued"], 1)
+        self.assertEqual(second_summary["reconciliation_queued"], 0)
+        self.assertEqual(
+            WithdrawalReconciliationTask.objects.filter(transaction=tx).count(), 1
+        )
+        gateway.transfer.assert_not_called()
 
     @override_settings(
         EXECUTOR_LOCK_CONTENTION_MAX_RETRIES=3,

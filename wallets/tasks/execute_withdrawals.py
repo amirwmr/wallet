@@ -10,7 +10,7 @@ from django.utils import timezone
 
 from wallets.integrations.bank_client import BankGateway, TransferResult
 from wallets.integrations.idempotency import ensure_transaction_idempotency_key
-from wallets.models import Transaction, Wallet
+from wallets.models import Transaction, Wallet, WithdrawalReconciliationTask
 
 logger = logging.getLogger(__name__)
 
@@ -97,7 +97,6 @@ def _claim_stale_processing_withdrawal(now, *, stale_after_seconds):
         if tx is None:
             return None
 
-        wallet = Wallet.objects.select_for_update().get(pk=tx.wallet_id)
         tx.idempotency_key = ensure_transaction_idempotency_key(tx)
         tx.failure_reason = None
         tx.save(update_fields=["idempotency_key", "failure_reason", "updated_at"])
@@ -112,11 +111,43 @@ def _claim_stale_processing_withdrawal(now, *, stale_after_seconds):
             "outcome": "claimed",
             "claim": ClaimedWithdrawal(
                 transaction_id=tx.id,
-                wallet_owner_ref=str(wallet.uuid),
+                wallet_owner_ref=str(tx.wallet.uuid),
                 amount=tx.amount,
                 idempotency_key=tx.idempotency_key,
             ),
         }
+
+
+def _queue_stale_processing_for_reconciliation(now, *, stale_after_seconds):
+    stale_before = now - timedelta(seconds=stale_after_seconds)
+    queryset = Transaction.objects.filter(
+        type=Transaction.Type.WITHDRAWAL,
+        status=Transaction.Status.PROCESSING,
+        updated_at__lte=stale_before,
+    ).order_by("updated_at", "id")
+
+    with transaction.atomic():
+        tx = _with_execution_lock(queryset).first()
+        if tx is None:
+            return None
+
+        tx.status = Transaction.Status.UNKNOWN
+        tx.failure_reason = "RECONCILIATION_REQUIRED"
+        tx.save(update_fields=["status", "failure_reason", "updated_at"])
+
+        task, created = WithdrawalReconciliationTask.objects.get_or_create(
+            transaction=tx,
+            defaults={"reason": "STALE_PROCESSING_WITHOUT_BANK_IDEMPOTENCY"},
+        )
+
+        logger.warning(
+            "event=withdrawal_reconciliation_queued tx_id=%s wallet_id=%s queue_created=%s task_id=%s",
+            tx.id,
+            tx.wallet_id,
+            created,
+            task.id,
+        )
+        return {"outcome": "reconciliation_queued", "transaction_id": tx.id}
 
 
 def _finalize_claimed_withdrawal(claim, transfer_result):
@@ -177,35 +208,45 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
             "succeeded": 0,
             "failed": 0,
             "insufficient_funds": 0,
+            "reconciliation_queued": 0,
         }
 
     bank_gateway = gateway or BankGateway()
     stale_after_seconds = settings.WITHDRAWAL_PROCESSING_STALE_SECONDS
     max_lock_contention_retries = settings.EXECUTOR_LOCK_CONTENTION_MAX_RETRIES
     lock_contention_backoff_seconds = settings.EXECUTOR_LOCK_CONTENTION_BACKOFF_SECONDS
+    bank_honors_idempotency = settings.BANK_HONORS_IDEMPOTENCY
     logger.info(
-        "event=executor_start limit=%s now=%s stale_after_seconds=%s max_lock_contention_retries=%s lock_contention_backoff_seconds=%s",
+        "event=executor_start limit=%s now=%s stale_after_seconds=%s max_lock_contention_retries=%s lock_contention_backoff_seconds=%s bank_honors_idempotency=%s",
         limit,
         now.isoformat(),
         stale_after_seconds,
         max_lock_contention_retries,
         lock_contention_backoff_seconds,
+        bank_honors_idempotency,
     )
 
     processed = 0
     succeeded = 0
     failed = 0
     insufficient_funds = 0
+    reconciliation_queued = 0
     lock_contention_retries = 0
 
     while processed < limit:
         try:
             claim_result = _claim_next_due_withdrawal(now)
             if claim_result is None:
-                claim_result = _claim_stale_processing_withdrawal(
-                    now,
-                    stale_after_seconds=stale_after_seconds,
-                )
+                if bank_honors_idempotency:
+                    claim_result = _claim_stale_processing_withdrawal(
+                        now,
+                        stale_after_seconds=stale_after_seconds,
+                    )
+                else:
+                    claim_result = _queue_stale_processing_for_reconciliation(
+                        now,
+                        stale_after_seconds=stale_after_seconds,
+                    )
         except OperationalError:
             lock_contention_retries += 1
             logger.warning(
@@ -234,6 +275,10 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
             processed += 1
             failed += 1
             insufficient_funds += 1
+            continue
+        if outcome == "reconciliation_queued":
+            processed += 1
+            reconciliation_queued += 1
             continue
 
         claim = claim_result["claim"]
@@ -274,12 +319,14 @@ def execute_due_withdrawals(limit=100, now=None, *, gateway=None):
         "succeeded": succeeded,
         "failed": failed,
         "insufficient_funds": insufficient_funds,
+        "reconciliation_queued": reconciliation_queued,
     }
     logger.info(
-        "event=executor_end processed=%s succeeded=%s failed=%s insufficient_funds=%s",
+        "event=executor_end processed=%s succeeded=%s failed=%s insufficient_funds=%s reconciliation_queued=%s",
         summary["processed"],
         summary["succeeded"],
         summary["failed"],
         summary["insufficient_funds"],
+        summary["reconciliation_queued"],
     )
     return summary

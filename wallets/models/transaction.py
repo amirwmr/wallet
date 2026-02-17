@@ -10,6 +10,7 @@ class Transaction(models.Model):
     class Status(models.TextChoices):
         SCHEDULED = "SCHEDULED", "Scheduled"
         PROCESSING = "PROCESSING", "Processing"
+        UNKNOWN = "UNKNOWN", "Unknown"
         SUCCEEDED = "SUCCEEDED", "Succeeded"
         FAILED = "FAILED", "Failed"
 
