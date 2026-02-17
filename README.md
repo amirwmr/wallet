@@ -83,6 +83,21 @@ cd ../third-party
 python3 app.py
 ```
 
+## Demo Seed Data
+Seed local demo users + wallets + transactions:
+
+```bash
+python manage.py seed_demo_data
+```
+
+Created/updated users:
+- `admin` / `admin` (superuser)
+- `demo_manager` / `demo123` (staff)
+- `demo_ops` / `demo123` (staff)
+- `demo_user` / `demo123` (regular user)
+
+The command is rerunnable and keeps deterministic demo wallets/transactions for API and executor testing.
+
 ## API
 Base path: `/api/wallets/`
 
